@@ -6,8 +6,9 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw, ImageOps
 import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageOps
+from sklearn.metrics import confusion_matrix, classification_report
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -15,7 +16,6 @@ import torchvision
 from torchvision.transforms import functional as F
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
-from sklearn.metrics import confusion_matrix, classification_report
 
 RT_ID_COLOR_MAP = {
     -1: "yellow",
@@ -298,209 +298,215 @@ def box_iou(boxA, boxB):
     return inter_area / union_area
 
 
-grade_dataset = GradeDataset(
-    img_dir=GD_TEST_IMG_PATH, 
-    ann_csv=GD_TEST_ANN_PATH, 
-    drop_incomplete=True, 
-    drop_volume=True
-)
-dataset_size = len(grade_dataset)
-train_size = int(0.8 * dataset_size)
-val_size = dataset_size - train_size
-generator = torch.Generator().manual_seed(42)
-train_dataset, val_dataset = torch.utils.data.random_split(grade_dataset, [train_size, val_size], generator=generator)
+def main():
+    grade_dataset = GradeDataset(
+        img_dir=GD_TEST_IMG_PATH,
+        ann_csv=GD_TEST_ANN_PATH,
+        drop_incomplete=True,
+        drop_volume=True
+    )
+    dataset_size = len(grade_dataset)
+    train_size = int(0.8 * dataset_size)
+    val_size = dataset_size - train_size
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset = torch.utils.data.random_split(grade_dataset, [train_size, val_size], generator=generator)
 
-BATCH_SIZE = 2
-NUM_WORKERS = 2
+    BATCH_SIZE = 2
+    NUM_WORKERS = 2
 
-train_dataloader = DataLoader(
-    train_dataset, 
-    batch_size=BATCH_SIZE, 
-    shuffle=True, 
-    collate_fn=collate_fn,
-    num_workers=NUM_WORKERS
-)
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=NUM_WORKERS
+    )
 
-val_dataloader = DataLoader(
-    val_dataset, 
-    batch_size=BATCH_SIZE, 
-    shuffle=False, 
-    collate_fn=collate_fn,
-    num_workers=NUM_WORKERS
-)
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        collate_fn=collate_fn,
+        num_workers=NUM_WORKERS
+    )
 
-num_classes = len(grade_dataset.grade_to_idx) + 1
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"Grades: {grade_dataset.grade_to_idx}")
+    num_classes = len(grade_dataset.grade_to_idx) + 1
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"GPU compute capability: {torch.cuda.get_device_capability() if torch.cuda.is_available() else 'N/A'}")
+    print(f"Grades: {grade_dataset.grade_to_idx}")
 
-model = build_model(num_classes).to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    model = build_model(num_classes).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
-num_epochs = 15
-loss_history = []
-start_train_time = time.perf_counter()
-for epoch in range(num_epochs):
-    model.train()
-    train_loss = 0.0
-    for images, targets in train_dataloader:
-        images = [img.to(device) for img in images]
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        
-        loss_dict = model(images, targets)
-        losses = sum(loss for loss in loss_dict.values())
-        
-        optimizer.zero_grad()
-        losses.backward()
-        optimizer.step()
-        
-        train_loss += losses.item()
-    
-    avg_loss = train_loss / len(train_dataloader)
-    
-    est_total_time = (time.perf_counter() - start_train_time) / (epoch + 1) * num_epochs
-    elapsed_time = time.perf_counter() - start_train_time
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}, Elapsed Time: {elapsed_time:.2f}s, Est. Time: {est_total_time:.2f}s")
-    loss_history.append(avg_loss)
-end_train_time = time.perf_counter()
-print(f"Training completed in {(end_train_time - start_train_time):.2f} seconds")
+    num_epochs = 15
+    loss_history = []
+    start_train_time = time.perf_counter()
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        for images, targets in train_dataloader:
+            images = [img.to(device) for img in images]
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-checkpoint = {
-    "model_state_dict": model.state_dict(),
-    "num_classes": num_classes,
-    "grade_to_idx": grade_dataset.grade_to_idx,
-    "idx_to_grade": grade_dataset.idx_to_grade,
-    "epoch": num_epochs,
-    "loss_history": loss_history,
-    "optimizer_state_dict": optimizer.state_dict()
-}
-torch.save(checkpoint, "route_grader_maskrcnn_checkpoint.pt")
-print("Saved checkpoint to route_grader_maskrcnn_checkpoint.pt")
+            loss_dict = model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())
 
-model.eval()
-all_true = []
-all_pred = []
-iou_threshold = 0.5
-score_threshold = 0.3
-no_detection_label = num_classes
-eval_start_time = time.perf_counter()
-with torch.no_grad():
-    for images, targets in val_dataloader:
-        images = [img.to(device) for img in images]
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        
-        outputs = model(images)
-        gt_boxes = targets[0]["boxes"].cpu().numpy()
-        gt_labels = targets[0]["labels"].cpu().numpy()
+            optimizer.zero_grad()
+            losses.backward()
+            optimizer.step()
 
-        pred_scores = outputs[0]["scores"].detach().cpu().numpy()
-        pred_boxes = outputs[0]["boxes"].detach().cpu().numpy()
-        pred_labels = outputs[0]["labels"].detach().cpu().numpy()
+            train_loss += losses.item()
 
-        keep = pred_scores >= score_threshold
-        pred_boxes = pred_boxes[keep]
-        pred_labels = pred_labels[keep]
+        avg_loss = train_loss / len(train_dataloader)
 
-        candidates = []
-        for gt_idx, gt_box in enumerate(gt_boxes):
-            for pred_idx, pred_box in enumerate(pred_boxes):
-                iou = box_iou(gt_box, pred_box)
-                if iou >= iou_threshold:
-                    candidates.append((iou, gt_idx, pred_idx))
+        est_total_time = (time.perf_counter() - start_train_time) / (epoch + 1) * num_epochs
+        elapsed_time = time.perf_counter() - start_train_time
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}, Elapsed Time: {elapsed_time:.2f}s, Est. Time: {est_total_time:.2f}s")
+        loss_history.append(avg_loss)
+    end_train_time = time.perf_counter()
+    print(f"Training completed in {(end_train_time - start_train_time):.2f} seconds")
 
-        candidates.sort(reverse=True, key=lambda x: x[0])
-        matched_gt = set()
-        matched_pred = set()
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "num_classes": num_classes,
+        "grade_to_idx": grade_dataset.grade_to_idx,
+        "idx_to_grade": grade_dataset.idx_to_grade,
+        "epoch": num_epochs,
+        "loss_history": loss_history,
+        "optimizer_state_dict": optimizer.state_dict()
+    }
+    torch.save(checkpoint, "route_grader_maskrcnn_checkpoint.pt")
+    print("Saved checkpoint to route_grader_maskrcnn_checkpoint.pt")
 
-        for _, gt_idx, pred_idx in candidates:
-            if gt_idx in matched_gt or pred_idx in matched_pred:
-                continue
-            matched_gt.add(gt_idx)
-            matched_pred.add(pred_idx)
-            all_true.append(int(gt_labels[gt_idx]))
-            all_pred.append(int(pred_labels[pred_idx]))
+    model.eval()
+    all_true = []
+    all_pred = []
+    iou_threshold = 0.5
+    score_threshold = 0.3
+    no_detection_label = num_classes
+    eval_start_time = time.perf_counter()
+    with torch.no_grad():
+        for images, targets in val_dataloader:
+            images = [img.to(device) for img in images]
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        for gt_idx in range(len(gt_labels)):
-            if gt_idx not in matched_gt:
+            outputs = model(images)
+            gt_boxes = targets[0]["boxes"].cpu().numpy()
+            gt_labels = targets[0]["labels"].cpu().numpy()
+
+            pred_scores = outputs[0]["scores"].detach().cpu().numpy()
+            pred_boxes = outputs[0]["boxes"].detach().cpu().numpy()
+            pred_labels = outputs[0]["labels"].detach().cpu().numpy()
+
+            keep = pred_scores >= score_threshold
+            pred_boxes = pred_boxes[keep]
+            pred_labels = pred_labels[keep]
+
+            candidates = []
+            for gt_idx, gt_box in enumerate(gt_boxes):
+                for pred_idx, pred_box in enumerate(pred_boxes):
+                    iou = box_iou(gt_box, pred_box)
+                    if iou >= iou_threshold:
+                        candidates.append((iou, gt_idx, pred_idx))
+
+            candidates.sort(reverse=True, key=lambda x: x[0])
+            matched_gt = set()
+            matched_pred = set()
+
+            for _, gt_idx, pred_idx in candidates:
+                if gt_idx in matched_gt or pred_idx in matched_pred:
+                    continue
+                matched_gt.add(gt_idx)
+                matched_pred.add(pred_idx)
                 all_true.append(int(gt_labels[gt_idx]))
-                all_pred.append(no_detection_label)
-
-        for pred_idx in range(len(pred_labels)):
-            if pred_idx not in matched_pred:
-                all_true.append(no_detection_label)
                 all_pred.append(int(pred_labels[pred_idx]))
 
+            for gt_idx in range(len(gt_labels)):
+                if gt_idx not in matched_gt:
+                    all_true.append(int(gt_labels[gt_idx]))
+                    all_pred.append(no_detection_label)
 
-eval_labels = list(range(num_classes)) + [no_detection_label]
-CM = confusion_matrix(all_true, all_pred, labels=eval_labels)
-acc = float(np.mean(np.array(all_true) == np.array(all_pred))) if all_true else 0.0
-report = classification_report(all_true, all_pred, labels=eval_labels, zero_division=0, digits=4)
+            for pred_idx in range(len(pred_labels)):
+                if pred_idx not in matched_pred:
+                    all_true.append(no_detection_label)
+                    all_pred.append(int(pred_labels[pred_idx]))
 
-print("Confusion Matrix:")
-print(CM)
-print(f"Accuracy: {acc:.4f}")
-print(f"No-detection label index: {no_detection_label}")
-print("Classification report:")
-print(report)
+    eval_labels = list(range(num_classes)) + [no_detection_label]
+    CM = confusion_matrix(all_true, all_pred, labels=eval_labels)
+    acc = float(np.mean(np.array(all_true) == np.array(all_pred))) if all_true else 0.0
+    report = classification_report(all_true, all_pred, labels=eval_labels, zero_division=0, digits=4)
 
-end_eval_time = time.perf_counter()
-print(f"Evaluation completed in {(end_eval_time - eval_start_time):.2f} seconds")
+    print("Confusion Matrix:")
+    print(CM)
+    print(f"Accuracy: {acc:.4f}")
+    print(f"No-detection label index: {no_detection_label}")
+    print("Classification report:")
+    print(report)
 
-# visualize confusion matrix
-plt.figure(figsize=(12, 10))
-plt.imshow(CM, interpolation="nearest", cmap=plt.cm.Blues)
-plt.title("Confusion Matrix")
-plt.colorbar()
+    end_eval_time = time.perf_counter()
+    print(f"Evaluation completed in {(end_eval_time - eval_start_time):.2f} seconds")
 
-tick_marks = np.arange(len(eval_labels))
-tick_names = []
-for lbl in eval_labels:
-    if lbl == 0:
-        tick_names.append("BG")
-    elif lbl == no_detection_label:
-        tick_names.append("No Det")
-    else:
-        tick_names.append(grade_dataset.idx_to_grade.get(lbl, str(lbl)))
+    # visualize confusion matrix
+    plt.figure(figsize=(12, 10))
+    plt.imshow(CM, interpolation="nearest", cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix")
+    plt.colorbar()
 
-plt.xticks(tick_marks, tick_names, rotation=45, ha="right")
-plt.yticks(tick_marks, tick_names)
+    tick_marks = np.arange(len(eval_labels))
+    tick_names = []
+    for lbl in eval_labels:
+        if lbl == 0:
+            tick_names.append("BG")
+        elif lbl == no_detection_label:
+            tick_names.append("No Det")
+        else:
+            tick_names.append(grade_dataset.idx_to_grade.get(lbl, str(lbl)))
 
-thresh = CM.max() / 2.0
-for i in range(CM.shape[0]):
-    for j in range(CM.shape[1]):
-        plt.text(j, i, str(CM[i, j]),
-                 ha="center", va="center",
-                 color="white" if CM[i, j] > thresh else "black",
-                 fontsize=8)
+    plt.xticks(tick_marks, tick_names, rotation=45, ha="right")
+    plt.yticks(tick_marks, tick_names)
 
-plt.xlabel("Predicted Label")
-plt.ylabel("True Label")
-plt.tight_layout()
-plt.show()
+    thresh = CM.max() / 2.0
+    for i in range(CM.shape[0]):
+        for j in range(CM.shape[1]):
+            plt.text(j, i, str(CM[i, j]),
+                     ha="center", va="center",
+                     color="white" if CM[i, j] > thresh else "black",
+                     fontsize=8)
 
-# visualize some predictions
-model.eval()
-val_iter = iter(val_dataloader)
-with torch.no_grad():
-    for i in range(min(5, len(val_dataloader))):
-        images, targets = next(val_iter)
-        images = [img.to(device) for img in images]
-        outputs = model(images)
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.tight_layout()
+    plt.show()
 
-        image_np = images[0].cpu().permute(1, 2, 0).numpy()
-        image_pil = Image.fromarray((image_np * 255).astype(np.uint8))
+    # visualize some predictions
+    model.eval()
+    val_iter = iter(val_dataloader)
+    with torch.no_grad():
+        for i in range(min(5, len(val_dataloader))):
+            images, targets = next(val_iter)
+            images = [img.to(device) for img in images]
+            outputs = model(images)
 
-        gt_boxes = targets[0]["boxes"].cpu().numpy()
-        gt_labels = targets[0]["labels"].cpu().numpy()
+            image_np = images[0].cpu().permute(1, 2, 0).numpy()
+            image_pil = Image.fromarray((image_np * 255).astype(np.uint8))
 
-        pred_boxes = outputs[0]["boxes"].detach().cpu().numpy()
-        pred_labels = outputs[0]["labels"].detach().cpu().numpy()
-        pred_scores = outputs[0]["scores"].detach().cpu().numpy()
+            gt_boxes = targets[0]["boxes"].cpu().numpy()
+            gt_labels = targets[0]["labels"].cpu().numpy()
 
-        visualize_predictions(
-            image_pil,
-            gt_boxes, gt_labels,
-            pred_boxes, pred_labels, pred_scores,
-            grade_dataset.idx_to_grade,
-            score_threshold=0.3
-        )
+            pred_boxes = outputs[0]["boxes"].detach().cpu().numpy()
+            pred_labels = outputs[0]["labels"].detach().cpu().numpy()
+            pred_scores = outputs[0]["scores"].detach().cpu().numpy()
+
+            visualize_predictions(
+                image_pil,
+                gt_boxes, gt_labels,
+                pred_boxes, pred_labels, pred_scores,
+                grade_dataset.idx_to_grade,
+                score_threshold=0.3
+            )
+
+
+if __name__ == "__main__":
+    torch.multiprocessing.freeze_support()
+    main()
