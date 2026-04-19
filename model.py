@@ -232,7 +232,7 @@ def visualize_gd_sample(image, target):
     plt.show()
     
     
-def visualize_predictions(image_pil, gt_boxes, gt_labels, pred_boxes, pred_labels, pred_scores, idx_to_grade, score_threshold=0.3):
+def visualize_predictions(image_pil, gt_boxes, gt_labels, pred_boxes, pred_labels, pred_scores, idx_to_grade, score_threshold=0.3, output_name="prediction.png"):
     result = image_pil.convert("RGB").copy()
     draw = ImageDraw.Draw(result)
 
@@ -255,7 +255,8 @@ def visualize_predictions(image_pil, gt_boxes, gt_labels, pred_boxes, pred_label
     plt.title("Green = GT, Red = Predicted")
     plt.axis("off")
     plt.tight_layout()
-    plt.show()
+    plt.savefig(output_name, dpi=200, bbox_inches="tight")
+    plt.close()
 
 
 def collate_fn(batch):
@@ -477,8 +478,9 @@ def main():
     plt.xlabel("Predicted Label")
     plt.ylabel("True Label")
     plt.tight_layout()
-    plt.show()
-
+    plt.savefig("confusion_matrix.png", dpi=200, bbox_inches="tight")
+    plt.close()
+    
     # visualize some predictions
     model.eval()
     val_iter = iter(val_dataloader)
@@ -503,7 +505,8 @@ def main():
                 gt_boxes, gt_labels,
                 pred_boxes, pred_labels, pred_scores,
                 grade_dataset.idx_to_grade,
-                score_threshold=0.3
+                score_threshold=0.3,
+                output_name=f"prediction_{i+1}.png"
             )
 
 
