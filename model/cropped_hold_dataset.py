@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 
 GD_TEST_IMG_PATH = "/home/public/rwiddop/images/"
 GD_TEST_ANN_PATH = "/home/public/rwiddop/annotation.csv"
-LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "logs/dataset.log")
+LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "logs/cropped_hold_dataset.log")
 
 
 logger = logging.getLogger(__name__)
