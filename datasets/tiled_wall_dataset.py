@@ -2,6 +2,7 @@ import ast
 import os
 import logging
 import json
+import random
 from collections import defaultdict
 
 import pandas as pd
@@ -37,10 +38,11 @@ if not logger.handlers:
 
 
 class TiledWallDataset(Dataset):
-    def __init__(self, img_dir, ann_csv, transform=None):
+    def __init__(self, img_dir, ann_csv, transform=None, augment=False):
         self.img_dir = img_dir
         self.ann_csv = ann_csv
         self.transform = transform
+        self.augment = augment
 
         self.img_files = sorted([f for f in os.listdir(img_dir) if f.endswith(".jpg")])
         self.annotations = pd.read_csv(ann_csv, dtype=str, keep_default_na=False)
@@ -185,10 +187,23 @@ class TiledWallDataset(Dataset):
             }
             return image_tensor, target
 
+        boxes_t = torch.tensor(boxes, dtype=torch.float32)
+        masks_t = torch.from_numpy(np.stack(masks, axis=0))
+
+        if self.augment:
+            if random.random() < 0.5:
+                image_tensor = F.hflip(image_tensor)
+                masks_t = torch.flip(masks_t, dims=[2])
+                boxes_t[:, [0, 2]] = W - boxes_t[:, [2, 0]]
+            if random.random() < 0.5:
+                image_tensor = F.vflip(image_tensor)
+                masks_t = torch.flip(masks_t, dims=[1])
+                boxes_t[:, [1, 3]] = H - boxes_t[:, [3, 1]]
+
         target = {
-            "boxes": torch.tensor(boxes, dtype=torch.float32),
+            "boxes": boxes_t,
             "labels": torch.tensor(labels, dtype=torch.int64),
-            "masks": torch.from_numpy(np.stack(masks, axis=0)),
+            "masks": masks_t,
             "area": torch.tensor(areas, dtype=torch.float32),
             "image_id": torch.tensor([index])
         }
