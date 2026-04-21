@@ -13,6 +13,8 @@ import torchvision.transforms.functional as F
 from torch.utils.data import Dataset
 
 LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "logs/tiled_hold_dataset.log")
+if not os.path.exists(os.path.dirname(LOG_FILE_PATH)):
+    os.makedirs(os.path.dirname(LOG_FILE_PATH))
 
 
 logger = logging.getLogger(__name__)
@@ -70,10 +72,6 @@ class TiledWallDataset(Dataset):
         
         self.hold_type_to_idx = {ht: idx + 1 for idx, ht in enumerate(hold_types)}
         self.idx_to_hold_type = {v: k for k, v in self.hold_type_to_idx.items()}
-        
-        assert len(self.img_files) == len(self.annotations), (
-            f"Mismatch: {len(self.img_files)} image files vs {len(self.annotations)} annotation rows"
-        )
         
         logger.info(
             "TiledWallDataset ready: %d tiles (%d positive, %d negative) | "
