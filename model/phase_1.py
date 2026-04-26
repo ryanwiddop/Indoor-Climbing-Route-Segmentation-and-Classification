@@ -125,6 +125,131 @@ def box_iou(boxA, boxB):
     return inter_area / union_area
 
 
+def load_model(checkpoint_path, device, max_detections=500):
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    hold_type_to_idx = ckpt["hold_type_to_idx"]
+    num_classes = ckpt["num_classes"]
+
+    model = build_model(num_classes)
+    state = ckpt["model_state_dict"]
+    if any(k.startswith("module.") for k in state.keys()):
+        state = {k[len("module."):]: v for k, v in state.items()}
+    model.load_state_dict(state)
+    model.roi_heads.detections_per_img = max_detections
+
+    model.to(device).eval()
+    return model, hold_type_to_idx, num_classes
+
+
+def _iter_tiles(H, W, tile, overlap):
+    stride = max(1, int(round(tile * (1.0 - overlap))))
+    ys = list(range(0, max(H - tile, 0) + 1, stride))
+    if not ys or ys[-1] + tile < H:
+        ys.append(max(0, H - tile))
+    ys = sorted(set(ys))
+    xs = list(range(0, max(W - tile, 0) + 1, stride))
+    if not xs or xs[-1] + tile < W:
+        xs.append(max(0, W - tile))
+    xs = sorted(set(xs))
+    for y0 in ys:
+        y1 = min(y0 + tile, H)
+        for x0 in xs:
+            x1 = min(x0 + tile, W)
+            yield y0, y1, x0, x1
+
+
+def _nms_numpy(boxes, scores, iou_threshold):
+    if len(boxes) == 0:
+        return np.array([], dtype=np.int64)
+    order = np.argsort(-scores).tolist()
+    keep = []
+    while order:
+        i = order.pop(0)
+        keep.append(i)
+        if not order:
+            break
+        bi = boxes[i]
+        rest = boxes[order]
+        x1 = np.maximum(bi[0], rest[:, 0])
+        y1 = np.maximum(bi[1], rest[:, 1])
+        x2 = np.minimum(bi[2], rest[:, 2])
+        y2 = np.minimum(bi[3], rest[:, 3])
+        iw = np.clip(x2 - x1, 0, None)
+        ih = np.clip(y2 - y1, 0, None)
+        inter = iw * ih
+        a_i = max(0, bi[2] - bi[0]) * max(0, bi[3] - bi[1])
+        a_r = np.clip(rest[:, 2] - rest[:, 0], 0, None) * \
+              np.clip(rest[:, 3] - rest[:, 1], 0, None)
+        union = a_i + a_r - inter
+        ious = np.where(union > 0, inter / union, 0.0)
+        order = [order[k] for k in range(len(order)) if ious[k] < iou_threshold]
+    return np.asarray(keep, dtype=np.int64)
+
+
+def _crop_mask_to_bbox(mask, box, img_h, img_w):
+    x1 = max(0, int(np.floor(box[0])))
+    y1 = max(0, int(np.floor(box[1])))
+    x2 = min(img_w, int(np.ceil(box[2])))
+    y2 = min(img_h, int(np.ceil(box[3])))
+    if x2 <= x1 or y2 <= y1:
+        return 0, 0, np.zeros((1, 1), dtype=bool)
+    return x1, y1, mask[y1:y2, x1:x2].copy()
+
+
+def tiled_predict(model, image_tensor_cpu, device, tile_size=800, overlap=0.25, score_threshold=0.05, nms_iou=0.5):
+    C, H, W = image_tensor_cpu.shape
+    all_boxes, all_scores, all_labels, all_masks = [], [], [], []
+
+    for (y0, y1, x0, x1) in _iter_tiles(H, W, tile_size, overlap):
+        tile = image_tensor_cpu[:, y0:y1, x0:x1].to(device)
+        with torch.no_grad():
+            out = model([tile])[0]
+
+        pb = out["boxes"].detach().cpu().numpy()
+        ps = out["scores"].detach().cpu().numpy()
+        pl = out["labels"].detach().cpu().numpy()
+        pm = (out["masks"].detach().cpu().numpy()[:, 0] > 0.5)
+        del out
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        keep = ps >= score_threshold
+        if not keep.any():
+            continue
+        pb = pb[keep]; ps = ps[keep]; pl = pl[keep]; pm = pm[keep]
+
+        tile_h = y1 - y0
+        tile_w = x1 - x0
+        for b, s, l, m in zip(pb, ps, pl, pm):
+            lx, ly, local = _crop_mask_to_bbox(m, b, tile_h, tile_w)
+            wall_box = np.array([b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0], dtype=np.float32)
+            all_boxes.append(wall_box)
+            all_scores.append(float(s))
+            all_labels.append(int(l))
+            all_masks.append((lx + x0, ly + y0, local))
+
+    if not all_boxes:
+        return {
+            "boxes":  np.zeros((0, 4), dtype=np.float32),
+            "scores": np.zeros((0,),   dtype=np.float32),
+            "labels": np.zeros((0,),   dtype=np.int64),
+            "masks":  []
+        }
+
+    all_boxes  = np.stack(all_boxes, axis=0)
+    all_scores = np.asarray(all_scores, dtype=np.float32)
+    all_labels = np.asarray(all_labels, dtype=np.int64)
+
+    keep_idx = _nms_numpy(all_boxes, all_scores, nms_iou)
+
+    return {
+        "boxes":  all_boxes[keep_idx],
+        "scores": all_scores[keep_idx],
+        "labels": all_labels[keep_idx],
+        "masks":  [all_masks[i] for i in keep_idx]
+    }
+
+
 def visualize_predictions(image_pil, gt_boxes, gt_labels, pred_boxes, pred_labels, pred_scores, idx_to_hold, score_threshold=0.3, output_name="prediction.png"):
     result = image_pil.convert("RGB").copy()
     draw = ImageDraw.Draw(result)
