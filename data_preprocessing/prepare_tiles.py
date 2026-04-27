@@ -97,7 +97,7 @@ def parse_args():
     p.add_argument("out_dir")
     p.add_argument("--tile-size",         type=int,   default=800)
     p.add_argument("--overlap",           type=float, default=0.25)
-    p.add_argument("--min-overlap-frac",  type=float, default=0.50,
+    p.add_argument("--min-overlap-frac",  type=float, default=0.35,
                    help="Min fraction of hold bbox that must overlap tile (default 0.50)")
     p.add_argument("--vis-per-image",     type=int,   default=3,
                    help="Positive-tile visualisations to save per source image (default 3)")
@@ -119,7 +119,9 @@ def main():
         os.makedirs(d)
     if os.path.exists(csv_path):
         os.remove(csv_path)
-        
+    if os.path.exists(args.out_dir) and not os.listdir(args.out_dir):
+        os.rmdir(args.out_dir)
+            
     annotations = pd.read_csv(args.ann_csv, dtype=str, keep_default_na=False)
     
     rows_by_img = defaultdict(list)
